@@ -1,0 +1,12 @@
+# PyInstaller artifacts — rebuilt by Modal image / install.sh
+build/
+dist/
+
+# Logs
+build-logs-*.txt
+*.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
