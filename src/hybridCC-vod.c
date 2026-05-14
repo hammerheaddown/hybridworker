@@ -21,6 +21,13 @@
 #include "caption/caption.h"
 #include "caption/mpeg.h"   /* sei_t, sei_init, sei_free, sei_from_caption_frame */
 #include "flv.h"
+
+/* Forward declarations — libcaption defines these in caption.c and examples/flv.c
+ * but never publishes prototypes in any header. Linux gcc treats implicit decls
+ * as warnings; w64devkit's gcc treats them as hard errors. Declared here so the
+ * build succeeds on every toolchain. Signatures lifted verbatim from sources. */
+extern libcaption_stauts_t caption_frame_end(caption_frame_t* frame);
+extern int flvtag_addsei(flvtag_t* tag, sei_t* sei);
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
