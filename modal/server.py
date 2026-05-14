@@ -759,8 +759,10 @@ class GPUWorker:
         result.segments = [s for s in result.segments
                            if not _is_hallucination(s.text or "")]
 
-        # Broadcast pacing
-        result.split_by_length(max_chars=42)
+        # Broadcast pacing — CEA-608 hard limit is 32 cols/row. Larger values
+        # produce lines that hybridCC-vod truncates at col 32, dropping the
+        # tail of long cues.
+        result.split_by_length(max_chars=32)
         result.split_by_duration(max_dur=3.5)
         result.split_by_gap(max_gap=0.4)
 
@@ -928,7 +930,11 @@ class GPUWorker:
                 f'| /usr/local/bin/hybridCC-vod {vtt_path} '
                 f'| ffmpeg -y -hide_banner -loglevel error '
                 f'-f flv -i pipe:0 {second_codec} '
-                f'-movflags +faststart {output_mp4}'
+                # fMP4 (moof segments) — Shaka/hls.js/MSE players run their
+                # CEA-608 SEI parser through MSE, which is skipped for plain
+                # progressive MP4. +faststart keeps the moov at front for fast
+                # HTTP-range start.
+                f'-movflags +frag_keyframe+empty_moov+default_base_moof+faststart {output_mp4}'
             )
             inject_proc = subprocess.run(
                 ["bash", "-c", "set -o pipefail; " + inject_cmd],
@@ -1035,7 +1041,8 @@ class GPUWorker:
                 "-i", str(input_mp4),
             ]
             cmd += _build_house_spec_args(target, input_mp4)
-            cmd += ["-movflags", "+faststart", str(output_mp4)]
+            # fMP4 — see inject branch above for rationale.
+            cmd += ["-movflags", "+frag_keyframe+empty_moov+default_base_moof+faststart", str(output_mp4)]
             meta["target"] = target
             meta["target_label"] = _resolve_preset(target)["label"]
             r = subprocess.run(cmd, capture_output=True, text=True)
@@ -1124,7 +1131,8 @@ class CPUWorker:
             "-i", str(input_path),
         ]
         cmd += _build_house_spec_args(target, input_path)
-        cmd += ["-movflags", "+faststart", str(output_path)]
+        # fMP4 — see hybridCC-vod inject branch for rationale.
+        cmd += ["-movflags", "+frag_keyframe+empty_moov+default_base_moof+faststart", str(output_path)]
 
         try:
             t0 = time.time()
