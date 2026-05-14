@@ -32,6 +32,39 @@
 #define MAX_VTT_SIZE  (4 * 1024 * 1024)   /* 4 MB hard cap */
 #define MAX_CUES       20000               /* ~5h at 1 cue/sec */
 #define MAX_CUE_TEXT   1024                /* single-cue text limit */
+#define CEA608_ROWS    15                  /* CEA-608 has 15 rows; broadcast CC uses 14-15 */
+
+/* libcaption's caption_frame_from_text writes line N to row N starting at row 0,
+ * which puts captions at the TOP of the screen — wrong for broadcast. By padding
+ * with (15 - line_count) leading newlines we push the actual text to rows 14-15
+ * (bottom) without modifying libcaption itself. Empty lines still advance the
+ * writeIndex counter inside caption_frame_from_text, so the math works cleanly. */
+static int flvtag_addcaption_text_bottom(flvtag_t* tag, const utf8_char_t* text)
+{
+    if (!text || !*text) return flvtag_addcaption_text(tag, text);
+
+    int line_count = 1;
+    for (const utf8_char_t* p = text; *p; p++) {
+        if (*p == '\n') line_count++;
+    }
+    if (line_count >= CEA608_ROWS) {
+        /* Caller passed a full-screen block — leave row positioning alone. */
+        return flvtag_addcaption_text(tag, text);
+    }
+
+    int pad = CEA608_ROWS - line_count;
+    size_t text_len = strlen((const char*)text);
+    /* Pad + text + NUL. Cap defensively so the buffer can never overflow. */
+    char buf[MAX_CUE_TEXT + CEA608_ROWS + 1];
+    if ((size_t)pad + text_len >= sizeof(buf)) {
+        return flvtag_addcaption_text(tag, text);
+    }
+    memset(buf, '\n', pad);
+    memcpy(buf + pad, text, text_len);
+    buf[pad + text_len] = '\0';
+
+    return flvtag_addcaption_text(tag, (const utf8_char_t*)buf);
+}
 
 typedef struct {
     double start;       /* seconds */
@@ -247,7 +280,7 @@ int main(int argc, char** argv)
              * to keep the display state alive. State-change-only injection
              * (pretty in extraction dumps) breaks VLC's CC renderer. */
             if (text && *text) {
-                flvtag_addcaption_text(&tag, (const utf8_char_t*)text);
+                flvtag_addcaption_text_bottom(&tag, (const utf8_char_t*)text);
                 injected++;
             }
         }
