@@ -19,6 +19,7 @@
  */
 
 #include "caption/caption.h"
+#include "caption/mpeg.h"   /* sei_t, sei_init, sei_free, sei_from_caption_frame */
 #include "flv.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -32,38 +33,77 @@
 #define MAX_VTT_SIZE  (4 * 1024 * 1024)   /* 4 MB hard cap */
 #define MAX_CUES       20000               /* ~5h at 1 cue/sec */
 #define MAX_CUE_TEXT   1024                /* single-cue text limit */
-#define CEA608_ROWS    15                  /* CEA-608 has 15 rows; broadcast CC uses 14-15 */
 
-/* libcaption's caption_frame_from_text writes line N to row N starting at row 0,
- * which puts captions at the TOP of the screen — wrong for broadcast. By padding
- * with (15 - line_count) leading newlines we push the actual text to rows 14-15
- * (bottom) without modifying libcaption itself. Empty lines still advance the
- * writeIndex counter inside caption_frame_from_text, so the math works cleanly. */
+/* libcaption's caption_frame_from_text writes line N into row N starting at
+ * row 0, which puts captions at the TOP — wrong for broadcast (standard is
+ * bottom rows 14-15). Leading-newline padding fails because the inner loop
+ * skips whitespace at line-start and only bumps the row counter for non-blank
+ * lines.
+ *
+ * Instead, mirror flvtag_addcaption_text but call caption_frame_write_char
+ * directly to drop the last 1-2 lines of input into rows 13-14, then take the
+ * same sei_init → sei_from_caption_frame → flvtag_addsei → sei_free path the
+ * library uses internally. */
+#define CEA608_BOTTOM_ROW   14   /* 0-indexed; CEA-608 has 15 rows total */
+#define CEA608_COL_WIDTH    32
+
 static int flvtag_addcaption_text_bottom(flvtag_t* tag, const utf8_char_t* text)
 {
     if (!text || !*text) return flvtag_addcaption_text(tag, text);
 
-    int line_count = 1;
-    for (const utf8_char_t* p = text; *p; p++) {
-        if (*p == '\n') line_count++;
+    /* Find the last 1-2 non-blank lines of input. We display 2 lines max,
+     * which matches CEA-608 pop-on convention and how downstream decoders
+     * (VLC, Shaka, hardware STBs) expect roll-up content to look. */
+    const utf8_char_t* line_prev = NULL;
+    const utf8_char_t* line_last = NULL;
+    const utf8_char_t* p = text;
+    while (*p) {
+        while (*p == '\n' || *p == '\r' || *p == ' ' || *p == '\t') p++;
+        if (!*p) break;
+        line_prev = line_last;
+        line_last = p;
+        while (*p && *p != '\n' && *p != '\r') p++;
     }
-    if (line_count >= CEA608_ROWS) {
-        /* Caller passed a full-screen block — leave row positioning alone. */
-        return flvtag_addcaption_text(tag, text);
+    if (!line_last) return flvtag_addcaption_text(tag, text);  /* nothing to write */
+
+    const utf8_char_t* sources[2];
+    int rows[2];
+    int n;
+    if (line_prev) {
+        sources[0] = line_prev;        rows[0] = CEA608_BOTTOM_ROW - 1;
+        sources[1] = line_last;        rows[1] = CEA608_BOTTOM_ROW;
+        n = 2;
+    } else {
+        sources[0] = line_last;        rows[0] = CEA608_BOTTOM_ROW;
+        n = 1;
     }
 
-    int pad = CEA608_ROWS - line_count;
-    size_t text_len = strlen((const char*)text);
-    /* Pad + text + NUL. Cap defensively so the buffer can never overflow. */
-    char buf[MAX_CUE_TEXT + CEA608_ROWS + 1];
-    if ((size_t)pad + text_len >= sizeof(buf)) {
-        return flvtag_addcaption_text(tag, text);
-    }
-    memset(buf, '\n', pad);
-    memcpy(buf + pad, text, text_len);
-    buf[pad + text_len] = '\0';
+    sei_t sei;
+    sei_init(&sei, (double)flvtag_pts(tag) / 1000.0);
 
-    return flvtag_addcaption_text(tag, (const utf8_char_t*)buf);
+    caption_frame_t frame;
+    caption_frame_init(&frame);
+    /* caption_frame_from_text does this before writing — caption_frame_write_char
+     * mutates whichever buffer ->write points at. */
+    frame.write = &frame.back;
+
+    for (int i = 0; i < n; i++) {
+        const utf8_char_t* lp = sources[i];
+        int col = 0;
+        while (*lp && *lp != '\n' && *lp != '\r' && col < CEA608_COL_WIDTH) {
+            size_t cl = utf8_char_length(lp);
+            if (cl == 0) break;
+            caption_frame_write_char(&frame, rows[i], col, eia608_style_white, 0, lp);
+            lp += cl;
+            col++;
+        }
+    }
+
+    caption_frame_end(&frame);
+    sei_from_caption_frame(&sei, &frame);
+    int ret = flvtag_addsei(tag, &sei);
+    sei_free(&sei);
+    return ret;
 }
 
 typedef struct {
